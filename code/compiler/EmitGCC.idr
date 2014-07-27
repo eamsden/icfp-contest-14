@@ -33,7 +33,7 @@ data Instr : Nat -> Type where
   DUM : Nat -> Instr nLabels
   RAP : Nat -> Instr nLabels
 
-emitInstr : SymbolTable nLabels [] nInstructions -> Instr nLabels -> String
+emitInstr : SymbolTable nLabels Z (Fin nInstructions) -> Instr nLabels -> String
 emitInstr _  (LDC k) = "LDC  " ++ show k ++ "\n"
 emitInstr _  (LD k j) = "LD   " ++ show k ++ " " ++ show j ++ "\n"
 emitInstr _  ADD = "ADD\n"
@@ -47,9 +47,9 @@ emitInstr _  ATOM = "ATOM\n"
 emitInstr _  CONS = "CONS\n"
 emitInstr _  CAR = "CAR\n"
 emitInstr _  CDR = "CDR\n"
-emitInstr st (SEL x y) = "SEL  " ++ show (finToNat x) ++ " " ++ show (finToNat y) ++ "\n"
+emitInstr st (SEL x y) = "SEL  " ++ show (finToNat (indexSymbolTable st x)) ++ " " ++ show (finToNat (indexSymbolTable st y)) ++ "\n"
 emitInstr _  JOIN = "JOIN\n"
-emitInstr _  (LDF x) = "LDF  " ++ show (finToNat x) ++ "\n"
+emitInstr st (LDF x) = "LDF  " ++ show (finToNat (indexSymbolTable st x)) ++ "\n"
 emitInstr _  (AP k) = "AP   " ++ show k ++ "\n"
 emitInstr _  RTN = "RTN\n"
 emitInstr _  (DUM k) = "DUM  " ++ show k ++ "\n"
@@ -80,105 +80,103 @@ weakenInstr (RAP n)     = RAP n
 weakenInstrs : Vect nInstrs (Instr nLabels) -> Vect nInstrs (Instr (S nLabels))
 weakenInstrs = map weakenInstr
 
-data GCC : Nat -> List Nat -> Nat -> Type where
+data GCC' : Bool -> Nat -> Nat -> Nat -> Type where
+  mkGCCEndLabel : SymbolTable nLabels missing (Fin (S nInstructions)) ->
+                  Vect nInstructions (Instr nLabels) ->
+                  GCC' False nLabels missing nInstructions
   mkGCC : SymbolTable nLabels missing (Fin nInstructions) ->
           Vect nInstructions (Instr nLabels) ->
-          GCC nLabels missing nInstructions
+          GCC' True nLabels missing nInstructions
+         
+GCC : Nat -> Nat -> Nat -> Type
+GCC = GCC' True
 
-emitGCC : GCC nLabels [] nInstructions -> String
+emitGCC : GCC nLabels Z nInstructions -> String
 emitGCC (mkGCC st ins) = concat (map (emitInstr st) (reverse ins))
 
-allocateLabel : GCC nLabels missing nInstructions -> 
-                ((fN : Fin (S nLabels)) -> 
-                 GCC (S nLabels) (nLabels :: missing) nInstructions ->
-                 GCC nLabels' missing' nInstructions') ->
-                GCC nLabels' missing' nInstructions'
-allocateLabel {nLabels} (mkGCC st ins) f = f (natToSelfFin nLabels) (mkGCC (emptySymbolTableSlot st) (weakenInstrs ins))
+withLabel : (Fin (S nLabels) ->
+             GCC' labelFull (S nLabels) (S missing) nInstructions ->
+             (nLabels' : Nat ** (nInstructions' : Nat ** GCC nLabels' (S missing) nInstructions'))) ->
+            GCC' labelFull nLabels missing nInstructions ->
+            (nLabels'' : Nat ** (nInstructions'' : Nat ** GCC' False nLabels'' missing nInstructions''))
+withLabel {nLabels} f (mkGCC st is) =
+  case f (natToSelfFin nLabels) (mkGCC (emptySymbolTableSlot st) (weakenInstrs is)) of
+    (nl ** (ni ** (mkGCC st' is'))) => (nl ** (ni ** (mkGCCEndLabel (fillSymbolTable (natToSelfFin ni) (mapSymbolTable weaken st')) is')))
+withLabel {nLabels} f (mkGCCEndLabel st is) =
+  case f (natToSelfFin nLabels) (mkGCCEndLabel (emptySymbolTableSlot st) (weakenInstrs is)) of
+    (nl ** (ni ** (mkGCC st' is'))) => (nl ** (ni ** (mkGCCEndLabel (fillSymbolTable (natToSelfFin ni) (mapSymbolTable weaken st')) is')))
 
-data DeleteFromList : List Nat -> Nat -> List Nat -> Type where
-  deleteFromHere : DeleteFromList (n :: ns) n ns
-  deleteBehind : DeleteFromList as n bs -> DeleteFromList (x :: as) n (x :: bs)
-
-fillLabel : (lab : Fin nLabels) ->
-            (pos : Fin nInstructions) ->
-            SymbolTable nLabels missing (Fin nInstructions) ->
-            {auto d : DeleteFromList missing (finToNat fn) missing'} ->
-            SymbolTable nLabels missing' (Fin nInstructions)
-
-placeLabel : (fn : Fin nLabels) ->
-             GCC nLabels missing nInstructions ->
-             {auto d : DeleteFromList missing (finToNat fn) missing'} ->
-             GCC nLabels missing' nInstructions
-
-IC : Nat -> List Nat -> Nat -> Type
-IC nLabels missing nInstructions = 
-  GCC nLabels missing nInstructions ->
+IC : Bool -> Nat -> Nat -> Nat -> Type
+IC labelFull nLabels missing nInstructions = 
+  GCC' labelFull nLabels missing nInstructions ->
   (nLabels' : Nat ** (nInstructions' : Nat ** GCC nLabels' missing nInstructions'))
 
 appendInstruction : Instr nLabels ->
-                    IC nLabels missing nInstructions
+                    IC labelFull nLabels missing nInstructions
+appendInstruction i (mkGCCEndLabel st ins) {nLabels} {nInstructions} =
+  (nLabels ** ((S nInstructions) ** mkGCC st (i :: ins)))
 appendInstruction i (mkGCC st ins) {nLabels} {nInstructions} =
   (nLabels ** ((S nInstructions) ** mkGCC (mapSymbolTable weaken st) (i :: ins)))
 
-ldc : Nat -> IC nLabels missing nInstructions 
+ldc : Nat -> IC labelFull nLabels missing nInstructions 
 ldc n st = appendInstruction (LDC n) st
 
-ld : Nat -> Nat -> IC nLabels missing nInstructions 
+ld : Nat -> Nat -> IC labelFull nLabels missing nInstructions 
 ld n1 n2 = appendInstruction (LD n1 n2)
 
-add : IC nLabels missing nInstructions
+add : IC labelFull nLabels missing nInstructions
 add = appendInstruction ADD
 
-sub : IC nLabels missing nInstructions
+sub : IC labelFull nLabels missing nInstructions
 sub = appendInstruction SUB
 
-mul : IC nLabels missing nInstructions
+mul : IC labelFull nLabels missing nInstructions
 mul = appendInstruction MUL
 
-div : IC nLabels missing nInstructions
+div : IC labelFull nLabels missing nInstructions
 div = appendInstruction DIV
 
-ceq : IC nLabels missing nInstructions
+ceq : IC labelFull nLabels missing nInstructions
 ceq = appendInstruction CEQ
 
-cgt : IC nLabels missing nInstructions
+cgt : IC labelFull nLabels missing nInstructions
 cgt = appendInstruction CGT
 
-cgte : IC nLabels missing nInstructions
+cgte : IC labelFull nLabels missing nInstructions
 cgte = appendInstruction CGTE
 
-atom : IC nLabels missing nInstructions
+atom : IC labelFull nLabels missing nInstructions
 atom = appendInstruction ATOM
 
-cons : IC nLabels missing nInstructions
+cons : IC labelFull nLabels missing nInstructions
 cons = appendInstruction CONS
 
-car : IC nLabels missing nInstructions
+car : IC labelFull nLabels missing nInstructions
 car = appendInstruction CAR
 
-cdr : IC nLabels missing nInstructions
+cdr : IC labelFull nLabels missing nInstructions
 cdr = appendInstruction CDR
 
-sel : Fin nLabels -> Fin nLabels -> IC nLabels missing nInstructions
+sel : Fin nLabels -> Fin nLabels -> IC labelFull nLabels missing nInstructions
 sel f1 f2 = appendInstruction (SEL f1 f2)
 
-join : IC nLabels missing nInstructions
+join : IC labelFull nLabels missing nInstructions
 join = appendInstruction JOIN
 
-ldf : Fin nLabels -> IC nLabels missing nInstructions
+ldf : Fin nLabels -> IC labelFull nLabels missing nInstructions
 ldf f = appendInstruction (LDF f)
 
-ap : Nat -> IC nLabels missing nInstructions
+ap : Nat -> IC labelFull nLabels missing nInstructions
 ap n = appendInstruction (AP n)
 
-rtn : IC nLabels missing nInstructions
+rtn : IC labelFull nLabels missing nInstructions
 rtn = appendInstruction RTN
 
-dum : Nat -> IC nLabels missing nInstructions
+dum : Nat -> IC labelFull nLabels missing nInstructions
 dum n = appendInstruction (DUM n)
 
-rap : Nat -> IC nLabels missing nInstructions
+rap : Nat -> IC labelFull nLabels missing nInstructions
 rap n = appendInstruction (RAP n)
 
-start : GCC Z [] Z
+start : GCC Z Z Z
 start = mkGCC emptySymbolTable []
